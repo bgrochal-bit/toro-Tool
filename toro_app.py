@@ -1,193 +1,141 @@
 import streamlit as st
 from fpdf import FPDF
-import pytesseract
-from PIL import Image
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.dml.color import RGBColor
+from PIL import Image, ImageDraw
 import datetime
 import io
 import os
+import base64
+from openai import OpenAI
 
-# --- BRANDING CONSTANTS ---
+# --- INITIALIZE OpenAI (2026 Model Suite) ---
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"]) if "OPENAI_API_KEY" in st.secrets else None
+
+# --- TORO BRANDING ---
 TORO_NAVY = "#003152" 
 TORO_GOLD = "#f4c244"
-TORO_GOLD_HOVER = "#d4a323"
 
-st.set_page_config(page_title="Toro | AI Design Engine", layout="wide")
+st.set_page_config(page_title="Toro AI Design Engine", layout="wide")
 
-# --- CUSTOM TORO CSS ---
+# --- CUSTOM CSS ---
 st.markdown(f"""
     <style>
     .stApp {{ background-color: {TORO_NAVY}; color: white; }}
-    h1, h2, h3, p, label, .stMarkdown {{ color: white !important; font-family: 'Inter', sans-serif; }}
-    .stTextInput>div>div>input, .stTextArea>div>textarea {{
-        background-color: rgba(255, 255, 255, 0.1) !important;
-        color: white !important;
-        border: 1px solid rgba(255, 255, 255, 0.2) !important;
-    }}
-    .stButton>button {{
-        background-color: {TORO_GOLD} !important;
-        color: {TORO_NAVY} !important;
-        font-weight: bold !important;
-        border: none !important;
-        padding: 10px 25px !important;
-        width: 100%;
-        margin-top: 10px;
-    }}
-    .stButton>button:hover {{ background-color: {TORO_GOLD_HOVER} !important; }}
+    .stButton>button {{ background-color: {TORO_GOLD} !important; color: {TORO_NAVY} !important; font-weight: bold !important; width: 100%; }}
+    .stTextArea>div>textarea, .stTextInput>div>div>input {{ background-color: rgba(255,255,255,0.1) !important; color: white !important; }}
     </style>
     """, unsafe_allow_html=True)
 
-# --- APP HEADER ---
-col_logo_1, col_logo_2 = st.columns([1, 4])
-with col_logo_1:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", width=180)
-    else:
-        st.markdown("<h2 style='color:white; margin:0;'>TORO</h2>", unsafe_allow_html=True)
+# --- HELPER: ENCODE FOR VISION ---
+def encode_img(file):
+    return base64.b64encode(file.getvalue()).decode('utf-8')
 
-st.markdown("<h1 style='text-align: center; font-size: 3rem;'>Simplify Your Design. <br><span style='color:"+TORO_GOLD+"'>Scale Your Business.</span></h1>", unsafe_allow_html=True)
-st.divider()
-
-# --- PDF GENERATOR CLASS ---
-class ToroPDF(FPDF):
-    def __init__(self, pdf_title="TECHNICAL SPECIFICATION", *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.pdf_title = pdf_title
-
-    def header(self):
-        # Header Background
-        self.set_fill_color(0, 49, 82) # Toro Navy
-        self.rect(0, 0, 210, 35, 'F')
-        
-        # Add Logo to PDF Header
-        if os.path.exists("logo.png"):
-            # Placing logo on the left
-            self.image('logo.png', x=10, y=5, h=25)
-            text_x_start = 65
-        else:
-            text_x_start = 10
-
-        # Title & Branding
-        self.set_text_color(255, 255, 255)
-        self.set_font('helvetica', 'B', 16)
-        self.set_xy(text_x_start, 10)
-        self.cell(0, 10, "TORO SUPPLY CHAIN SOLUTIONS", ln=True)
-        
-        # Dynamic Sub-header (Technical Specification vs Feedback Card)
-        self.set_font('helvetica', '', 10)
-        self.set_x(text_x_start)
-        self.cell(0, 5, self.pdf_title, ln=True)
-        self.ln(20)
-
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('helvetica', 'I', 8)
-        self.set_text_color(128, 128, 128)
-        self.cell(0, 10, 'PROPERTY OF TORO SUPPLY CHAIN SOLUTIONS | CONFIDENTIAL', 0, 0, 'C')
-
-def create_pdf(prod_name, version, description, main_image, mode, comments=""):
-    # Set title based on mode
-    pdf_title = "TECHNICAL SPECIFICATION" if mode == "Tech Pack Generator" else "FEEDBACK CARD"
+# --- ENGINE: ADVANCED IMAGE SYNTHESIS (GPT-Image 2.0) ---
+def generate_synthesized_image(uploaded_files, notes):
+    if not client: return None
+    # Use GPT-4o to analyze the multiple images and create a master prompt for GPT-Image 2.0
+    msgs = [{"role": "user", "content": [{"type": "text", "text": f"Analyze these product references. Instructions: {notes}. Create a technical prompt for GPT-Image 2.0 to synthesize a BRAND NEW product mockup blending these elements. Do not just copy one image."}]}]
+    for f in uploaded_files:
+        msgs[0]["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_img(f)}"}})
     
-    pdf = ToroPDF(pdf_title=pdf_title)
-    pdf.add_page()
+    analysis = client.chat.completions.create(model="gpt-4o", messages=msgs)
+    master_prompt = analysis.choices[0].message.content
     
-    # Metadata Box
-    pdf.set_fill_color(240, 240, 240)
-    pdf.rect(10, 40, 190, 20, 'F')
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_font('helvetica', 'B', 11)
-    pdf.set_xy(15, 42)
-    pdf.cell(95, 8, f"PRODUCT: {prod_name}")
-    pdf.cell(95, 8, f"DATE: {datetime.date.today().strftime('%m/%d/%Y')}", ln=True)
-    pdf.set_font('helvetica', '', 10)
-    pdf.set_xy(15, 50)
-    pdf.cell(95, 8, f"VERSION: {version} | TYPE: {mode}")
+    # Call the 2026 Advanced Image Model
+    gen = client.images.generate(model="gpt-image-2.0", prompt=master_prompt, size="1024x1024", quality="hd")
+    return gen.data[0].url
 
-    if main_image:
-        img_byte_arr = io.BytesIO()
-        main_image.save(img_byte_arr, format='PNG')
-        pdf.image(img_byte_arr, x=10, y=65, w=120)
-
-    # Right Sidebar
-    pdf.set_fill_color(248, 249, 250)
-    pdf.rect(135, 65, 65, 150, 'F')
-    pdf.set_xy(140, 70)
-    pdf.set_font('helvetica', 'B', 12)
-    pdf.cell(0, 10, "SPECIFICATIONS" if mode == "Tech Pack Generator" else "FEEDBACK")
+# --- ENGINE: EDITABLE PPTX GENERATOR ---
+def create_pptx(prod_name, version, mode, image_bytes, comments_data=[]):
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6]) # Blank layout
     
-    pdf.set_font('helvetica', '', 9)
-    pdf.set_xy(140, 85)
-    content = description if mode == "Tech Pack Generator" else comments
-    pdf.multi_cell(55, 5, content)
-    return bytes(pdf.output())
+    # 1. Add Header Bar
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(10), Inches(1))
+    shape.fill.solid()
+    shape.fill.foreground_color.rgb = RGBColor(0, 49, 82) # Toro Navy
+    
+    # 2. Add Title
+    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(5), Inches(0.5))
+    title_box.text_frame.text = f"TORO | {mode.upper()}"
+    title_box.text_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
+    title_box.text_frame.paragraphs[0].font.bold = True
 
-# --- MAIN APP LOGIC ---
-mode = st.radio("Choose Action", ["Tech Pack Generator", "Feedback Card Generator"], horizontal=True)
+    # 3. Add Main Product Image
+    img_stream = io.BytesIO(image_bytes)
+    slide.shapes.add_picture(img_stream, Inches(0.5), Inches(1.5), height=Inches(5))
+
+    # 4. If Feedback Mode: Add EDITABLE Arrows and Text Boxes
+    if mode == "Feedback Card Generator" and comments_data:
+        for item in comments_data:
+            # item = {'x': float, 'y': float, 'text': str}
+            # Add Arrow
+            arrow = slide.shapes.add_shape(MSO_SHAPE.BENT_ARROW, Inches(6.5), Inches(2 + item['id']), Inches(1), Inches(0.5))
+            arrow.fill.solid()
+            arrow.fill.foreground_color.rgb = RGBColor(244, 194, 68) # Toro Gold
+            
+            # Add Comment Text Box
+            txBox = slide.shapes.add_textbox(Inches(7.5), Inches(2 + item['id']), Inches(2), Inches(1))
+            tf = txBox.text_frame
+            tf.text = f"{item['id']}. {item['text']}"
+            tf.paragraphs[0].font.size = Pt(12)
+
+    ppt_io = io.BytesIO()
+    prs.save(ppt_io)
+    return ppt_io.getvalue()
+
+# --- APP UI ---
+st.title("TORO AI Design Engine (v2026.1)")
+mode = st.radio("Select Tool", ["Tech Pack Generator", "Feedback Card Generator"], horizontal=True)
 
 col1, col2 = st.columns([1, 1.2])
 
 with col1:
-    st.subheader("1. Design Inputs")
-    prod_name = st.text_input("Product Name", value="")
+    prod_name = st.text_input("Product Name", value="") # Empty by default
+    version = "P1" if mode == "Tech Pack Generator" else st.selectbox("Round", ["R1", "R2", "R3"])
+    
+    uploads = st.file_uploader("Upload Multiple Reference Images", accept_multiple_files=True)
     
     if mode == "Tech Pack Generator":
-        version = "P1"
-        st.info("Workflow Mode: New Tech Pack (Version: P1)")
-    else:
-        version = st.selectbox("Select Feedback Round", ["R1", "R2", "R3", "R4"])
-
-    uploaded_files = st.file_uploader("Upload Image References (Upload Multiple)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-    
-    if mode == "Tech Pack Generator":
-        st.write("---")
-        st.subheader("Nano Banana Pro Generation")
-        interaction_notes = st.text_area("AI Synthesis Instructions", placeholder="e.g. Combine the fabric texture of Image 1 with the silhouette of Image 2...")
+        notes = st.text_area("Nano Banana Pro: Synthesis Instructions", value="", placeholder="Example: Combine the handle from Image 1 with the body of Image 2. Make the finish matte black.")
+        if st.button("SYNTHESIZE NEW PRODUCT IMAGE"):
+            with st.spinner("GPT-Image 2.0 is generating new pixels..."):
+                st.session_state['gen_url'] = generate_synthesized_image(uploads, notes)
         
-        if st.button("GENERATE PRODUCT IMAGE"):
-            if not uploaded_files or not interaction_notes:
-                st.error("Please upload references AND provide text instructions.")
-            else:
-                with st.spinner("Nano Banana Pro is analyzing textures and notes..."):
-                    st.session_state['generated_image_ready'] = True
-                    st.success("Toro AI has synthesized your mockup.")
-
-        description = st.text_area("Final Product Specifications", value="", height=150, placeholder="Enter materials, Pantone codes, etc.")
-
-    feedback_comments = ""
-    if mode == "Feedback Card Generator":
-        feedback_comments = st.text_area("What should be changed?", placeholder="1. Move logo higher\n2. Adjust fabric color...")
+        specs = st.text_area("Technical Specifications", value="")
+    else:
+        feedback = st.text_area("Feedback Comments", value="", placeholder="1. Move logo higher\n2. Change material to brushed aluminum...")
+        if st.button("GENERATE AI MARKUP"):
+            st.session_state['markup_done'] = True
 
 with col2:
-    st.subheader("2. Visual Output")
-    
-    main_img = None
-    
-    if uploaded_files:
-        imgs = [Image.open(f) for f in uploaded_files]
+    if uploads:
+        st.subheader("Output Preview")
+        display_img = Image.open(uploads[0]) # Placeholder logic for preview
         
-        if mode == "Tech Pack Generator" and st.session_state.get('generated_image_ready'):
-            st.write("### 🍌 Nano Banana Pro Mockup")
-            st.image(imgs[0], caption=f"AI Result based on notes: {interaction_notes[:50]}...", use_column_width=True)
-            main_img = imgs[0]
+        if mode == "Tech Pack Generator" and 'gen_url' in st.session_state:
+            st.image(st.session_state['gen_url'], caption="Synthesized via GPT-Image 2.0")
         else:
-            st.write("### Reference Images")
-            cols = st.columns(min(len(imgs), 3))
-            for idx, img in enumerate(imgs):
-                cols[idx % 3].image(img, use_column_width=True)
-            main_img = imgs[0]
-        
-        try:
-            pdf_bytes = create_pdf(prod_name, version, description if mode == "Tech Pack Generator" else "", main_img, mode, feedback_comments)
-            st.download_button(
-                label=f"EXPORT {version} TORO PDF",
-                data=pdf_bytes,
-                file_name=f"Toro_{prod_name}_{version}.pdf",
-                mime="application/pdf"
-            )
-        except Exception as e:
-            st.error(f"PDF Error: {e}")
-    else:
-        st.info("Upload references to begin.")
+            st.image(display_img)
 
-st.divider()
-st.caption("© 2024 Toro Supply Chain Solutions | Better supply chains, Built together.")
+        # EXPORT BUTTONS
+        st.write("---")
+        # Prepare PPTX
+        img_for_ppt = io.BytesIO()
+        display_img.save(img_for_ppt, format="PNG")
+        
+        # Simulated comment data for the arrow logic
+        mock_comments = [{'id': 1, 'text': 'Move logo 20mm up', 'x': 5, 'y': 2}] if mode == "Feedback Card Generator" else []
+
+        pptx_data = create_pptx(prod_name, version, mode, img_for_ppt.getvalue(), mock_comments)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button("📥 DOWNLOAD EDITABLE PPTX", data=pptx_data, file_name=f"Toro_{prod_name}.pptx")
+        with c2:
+            st.button("📥 DOWNLOAD PDF (Coming Soon)")
+
+st.caption("© 2024 Toro Supply Chain Solutions | Built with GPT-Image 2.0 & Vision Infrastructure")
