@@ -4,7 +4,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.dml.color import RGBColor
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import datetime
 import io
 import os
@@ -14,21 +14,23 @@ from openai import OpenAI
 import json
 
 # --- INITIALIZE OpenAI ---
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"]) if "OPENAI_API_KEY" in st.secrets else None
+# Ensure you have OPENAI_API_KEY in Streamlit Cloud -> Settings -> Secrets
+openai_key = st.secrets.get("OPENAI_API_KEY")
+client = OpenAI(api_key=openai_key) if openai_key else None
 
 # --- TORO BRANDING ---
-TORO_NAVY = (0, 49, 82)      # RGB for PDF/PPTX
-TORO_NAVY_HEX = "#003152"    # Hex for CSS
-TORO_GOLD = (244, 194, 68)   # RGB for PDF/PPTX
-TORO_GOLD_HEX = "#f4c244"    # Hex for CSS
+TORO_NAVY = (0, 49, 82)      
+TORO_NAVY_HEX = "#003152"    
+TORO_GOLD = (244, 194, 68)   
+TORO_GOLD_HEX = "#f4c244"    
 
 st.set_page_config(page_title="Toro AI Design Engine", layout="wide")
 
-# --- CUSTOM CSS ---
+# --- CUSTOM CSS (Toro Website Look & Feel) ---
 st.markdown(f"""
     <style>
     .stApp {{ background-color: {TORO_NAVY_HEX}; color: white; }}
-    .stButton>button {{ background-color: {TORO_GOLD_HEX} !important; color: {TORO_NAVY_HEX} !important; font-weight: bold !important; width: 100%; border-radius: 4px; }}
+    .stButton>button {{ background-color: {TORO_GOLD_HEX} !important; color: {TORO_NAVY_HEX} !important; font-weight: bold !important; width: 100%; border: none; }}
     .stTextArea>div>textarea, .stTextInput>div>div>input {{ background-color: rgba(255,255,255,0.1) !important; color: white !important; border: 1px solid rgba(255,255,255,0.2) !important; }}
     h1, h2, h3, p, label {{ color: white !important; font-family: 'Inter', sans-serif; }}
     </style>
@@ -39,137 +41,118 @@ def encode_image(image_bytes):
     return base64.b64encode(image_bytes).decode('utf-8')
 
 def download_image(url):
+    if not url or not url.startswith("http"):
+        return None
     response = requests.get(url)
     return io.BytesIO(response.content)
 
-# --- ENGINE: SYNTHESIS (DALL-E 3 + GPT-4o Vision) ---
+# --- ENGINE: SYNTHESIS (GPT-4o Vision + DALL-E 3) ---
 def synthesize_product(uploaded_files, instructions):
-    if not client: return None
-    # Vision Architect: GPT-4o analyzes uploads to create a perfect prompt for DALL-E 3
-    msgs = [{"role": "user", "content": [{"type": "text", "text": f"Analyze these references. Generate a detailed prompt for DALL-E 3 to synthesize ONE new product image based on these instructions: {instructions}. Be technical and specific."}]}]
+    if not client:
+        st.error("OpenAI API Key not found. Please add it to Streamlit Secrets.")
+        return None
     
-    for f in uploaded_files:
-        msgs[0]["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image(f.getvalue())}"}})
-    
-    analysis = client.chat.completions.create(model="gpt-4o", messages=msgs)
-    prompt = analysis.choices[0].message.content
-    
-    gen = client.images.generate(model="dall-e-3", prompt=prompt, size="1024x1024", quality="hd")
-    return gen.data[0].url
-
-# --- ENGINE: SMART MARKUP ARROWS ---
-def generate_markup_image(base_img_bytes, feedback_text):
-    if not client: return None, []
-    
-    prompt = f"""
-    Look at this product image. Based on these comments: {feedback_text}
-    Identify the X and Y coordinates (0-1000 scale) for where an arrow should point for each comment.
-    Return ONLY a JSON object with a key 'points' containing a list of: {{"id": 1, "x": 500, "y": 300, "text": "comment text"}}
-    """
-    
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image(base_img_bytes)}"}}]}],
-        response_format={ "type": "json_object" }
-    )
-    
-    data = json.loads(response.choices[0].message.content)
-    points = data.get("points", [])
-    
-    # Draw on image
-    img = Image.open(io.BytesIO(base_img_bytes)).convert("RGB")
-    draw = ImageDraw.Draw(img)
-    w, h = img.size
-    
-    for p in points:
-        nx, ny = (p['x']/1000)*w, (p['y']/1000)*h
-        # Draw Arrow (Toro Gold)
-        draw.line([(nx - 60, ny - 60), (nx, ny)], fill=(244, 194, 68), width=10)
-        # Draw Label Circle
-        draw.ellipse([nx-80, ny-80, nx-40, ny-40], fill=(0, 49, 82), outline=(244, 194, 68), width=3)
-        # In a real app, you'd add text here; for now, we leave the label circle
+    try:
+        # GPT-4o analyzes textures/shape to write a DALL-E prompt
+        msgs = [{"role": "user", "content": [{"type": "text", "text": f"Instructions: {instructions}. Create a professional, hyper-realistic product mockup prompt for DALL-E 3 based on these images."}]}]
+        for f in uploaded_files:
+            msgs[0]["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image(f.getvalue())}"}})
         
-    out_io = io.BytesIO()
-    img.save(out_io, format="PNG")
-    return out_io.getvalue(), points
+        analysis = client.chat.completions.create(model="gpt-4o", messages=msgs)
+        prompt = analysis.choices[0].message.content
+        
+        gen = client.images.generate(model="dall-e-3", prompt=prompt, size="1024x1024", quality="hd")
+        return gen.data[0].url
+    except Exception as e:
+        st.error(f"Synthesis Failed: {e}")
+        return None
 
-# --- EXPORT ENGINE (PDF & PPTX) ---
-def export_docs(prod_name, version, mode, img_bytes, comments):
-    # PPTX
+# --- EXPORT ENGINE (Editable PPTX) ---
+def export_pptx(prod_name, version, mode, img_bytes, comments_text):
     prs = Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     
-    # Navy Header
+    # Header Bar
     rect = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(10), Inches(0.8))
     rect.fill.solid()
     rect.fill.foreground_color.rgb = RGBColor(*TORO_NAVY)
     
-    title = slide.shapes.add_textbox(Inches(0.2), Inches(0.1), Inches(8), Inches(0.5))
-    title.text_frame.text = f"TORO | {mode.upper()} | {version}"
-    title.text_frame.paragraphs[0].font.color.rgb = RGBColor(255,255,255)
-    title.text_frame.paragraphs[0].font.bold = True
+    # Title logic
+    header_title = "TECHNICAL SPECIFICATION" if mode == "Tech Pack Generator" else "FEEDBACK CARD"
+    title_text = f"TORO | {header_title} | {version}"
     
-    # Image
+    title = slide.shapes.add_textbox(Inches(0.2), Inches(0.1), Inches(8), Inches(0.5))
+    tf = title.text_frame
+    tf.text = title_text
+    tf.paragraphs[0].font.color.rgb = RGBColor(255,255,255)
+    tf.paragraphs[0].font.bold = True
+    
+    # Product Image
     slide.shapes.add_picture(io.BytesIO(img_bytes), Inches(0.5), Inches(1.2), height=Inches(5))
     
-    # Comments (Editable Shapes)
-    if mode == "Feedback Card Generator":
-        for i, c in enumerate(comments):
-            # Editable Text Box
-            tb = slide.shapes.add_textbox(Inches(6.5), Inches(1.5 + (i*0.8)), Inches(3), Inches(0.7))
-            tb.text_frame.text = f"{c['id']}. {c['text']}"
-            tb.text_frame.paragraphs[0].font.size = Pt(12)
-            # Editable Arrow
-            arrow = slide.shapes.add_shape(MSO_SHAPE.BENT_ARROW, Inches(6), Inches(1.6 + (i*0.8)), Inches(0.4), Inches(0.4))
-            arrow.fill.solid()
-            arrow.fill.foreground_color.rgb = RGBColor(*TORO_GOLD)
+    # Editable Comments & Arrows for Feedback
+    if mode == "Feedback Card Generator" and comments_text:
+        lines = comments_text.split('\n')
+        for i, line in enumerate(lines[:5]): # Limit to first 5 for layout
+            if line.strip():
+                # Text Box
+                tb = slide.shapes.add_textbox(Inches(6.2), Inches(1.5 + (i*0.9)), Inches(3.5), Inches(0.8))
+                tb.text_frame.word_wrap = True
+                tb.text_frame.text = line.strip()
+                # Arrow
+                arrow = slide.shapes.add_shape(MSO_SHAPE.BENT_ARROW, Inches(5.7), Inches(1.6 + (i*0.9)), Inches(0.4), Inches(0.4))
+                arrow.fill.solid()
+                arrow.fill.foreground_color.rgb = RGBColor(*TORO_GOLD)
 
     ppt_io = io.BytesIO()
     prs.save(ppt_io)
     return ppt_io.getvalue()
 
 # --- APP UI ---
-st.title("Simplify Your Design. Scale Your Business.")
-mode = st.radio("Choose Workflow", ["Tech Pack Generator", "Feedback Card Generator"], horizontal=True)
+col_logo_1, col_logo_2 = st.columns([1, 4])
+with col_logo_1:
+    if os.path.exists("logo.png"): st.image("logo.png", width=180)
+st.markdown("<h1 style='text-align: center;'>Simplify Your Design. Scale Your Business.</h1>", unsafe_allow_html=True)
+
+mode = st.radio("Select Action", ["Tech Pack Generator", "Feedback Card Generator"], horizontal=True)
 
 col1, col2 = st.columns([1, 1.2])
 
 with col1:
     st.subheader("1. Design Inputs")
     prod_name = st.text_input("Product Name", value="")
-    
-    # TP = P1 always, FB = Choice
-    version = "P1" if mode == "Tech Pack Generator" else st.selectbox("Select Feedback Round", ["R1", "R2", "R3"])
+    version = "P1" if mode == "Tech Pack Generator" else st.selectbox("Select Round", ["R1", "R2", "R3"])
     
     uploads = st.file_uploader("Upload Image References", accept_multiple_files=True)
     
     if mode == "Tech Pack Generator":
-        notes = st.text_area("Synthesis Instructions", placeholder="e.g. Combine the shape of image 1 with the color of image 2...")
-        if st.button("SYNTHESIZE PRODUCT"):
-            url = synthesize_product(uploads, notes)
-            st.session_state['gen_bytes'] = download_image(url).getvalue()
+        notes = st.text_area("Synthesis Instructions", placeholder="Describe how to blend images...")
+        if st.button("GENERATE NEW PRODUCT IMAGE"):
+            with st.spinner("AI Synthesizing New Mockup..."):
+                url = synthesize_product(uploads, notes)
+                img_data = download_image(url)
+                if img_data:
+                    st.session_state['gen_bytes'] = img_data.getvalue()
+        
+        specs = st.text_area("Final Specifications", value="")
     else:
-        feedback = st.text_area("Feedback Details", placeholder="1. Move logo higher\n2. Change button color...")
-        if st.button("GENERATE FEEDBACK MARKUP"):
-            res_bytes, pts = generate_markup_image(uploads[0].getvalue(), feedback)
-            st.session_state['fb_bytes'] = res_bytes
-            st.session_state['fb_points'] = pts
+        feedback = st.text_area("Feedback Comments", placeholder="1. Comment one\n2. Comment two...")
 
 with col2:
     st.subheader("2. Visual Output")
-    active_img_bytes = None
+    active_img = None
     
     if mode == "Tech Pack Generator" and 'gen_bytes' in st.session_state:
-        active_img_bytes = st.session_state['gen_bytes']
-        st.image(active_img_bytes, caption="AI Synthesized Result (DALL-E 3)")
-    elif mode == "Feedback Card Generator" and 'fb_bytes' in st.session_state:
-        active_img_bytes = st.session_state['fb_bytes']
-        st.image(active_img_bytes, caption="AI Markup Result (GPT-4o Vision)")
+        active_img = st.session_state['gen_bytes']
+        st.image(active_img, caption="AI Synthesized Mockup")
     elif uploads:
-        active_img_bytes = uploads[0].getvalue()
-        st.image(active_img_bytes, caption="Reference Upload")
+        active_img = uploads[0].getvalue()
+        st.image(active_img, caption="Reference Preview")
 
-    if active_img_bytes:
+    if active_img:
         st.write("---")
-        pptx = export_docs(prod_name, version, mode, active_img_bytes, st.session_state.get('fb_points', []))
-        st.download_button("📥 DOWNLOAD EDITABLE PPTX", data=pptx, file_name=f"Toro_{prod_name}.pptx")
+        ppt_data = export_pptx(prod_name, version, mode, active_img, feedback if mode == "Feedback Card Generator" else "")
+        st.download_button(f"📥 DOWNLOAD EDITABLE {version} PPTX", data=ppt_data, file_name=f"Toro_{prod_name}.pptx")
+
+st.divider()
+st.caption("© 2024 Toro Supply Chain Solutions | Better supply chains, Built together.")
